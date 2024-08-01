@@ -1,0 +1,174 @@
+---
+- name: Install HAProxy and Setup LetsEncrypt
+  hosts: "{{ target }}"
+  gather_facts: true
+  become: true
+  vars_files:
+  - "{{ vars_file | default('haproxyvars.yml') }}"
+  tasks:
+    # Open http & https firewall services to allow HTTP/HTTPS traffic
+    - name: Open Firewall Ports
+      ansible.posix.firewalld:
+        service: "{{ item }}"
+        immediate: true
+        permanent: true
+        state: enabled
+      loop: 
+        - "http"
+        - "https"
+    
+    # Open port to enable access of HAProxy Stats/Status Page
+    - name: Open Firewall Port for Stats Page
+      ansible.posix.firewalld:
+        port: "{{ stats_page_port }}/tcp"
+        immediate: true
+        permanent: true
+        state: enabled
+      when: stats_page_enable
+    
+    # Install EPEL depending on RHEL version
+    - name: Install EPEL
+      ansible.buiiltin.yum: 
+        name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm"
+        state: present
+        disable_gpg_check: yes
+    
+    # Install required packages
+    - name: Install Packages
+      ansible.builtin.yum:
+        name: "{{ packages }}"
+        state: latest
+      vars:
+        packages:
+        - haproxy
+        - certbot
+        - python3-libselinux
+    
+    # Disable SELinux for installation
+    # TODO: Make it work better with SELinux
+    - name: Disable SELinux
+      ansible.posix.selinux:
+        state: disabled
+      register: selinuxresult
+
+    # Reboot the server if required after SELinux is disabled
+    - name: Reboot
+      ansible.builtin.reboot:
+      when: selinuxresult.reboot_required
+    
+    # Create an RSYSLOG configuration file for HAProxy logging
+    - name: Create Rsyslog Config
+      ansible.builtin.copy:
+        src: syslog.cfg
+        dest: /etc/rsyslog.d/99-haproxy.conf
+      notify: Restart rsyslog
+
+    # Create a socket to allow HAproxy logging
+    - name: make log socket directory
+      ansible.builtin.file:
+        path: /var/lib/haproxy/dev
+        state: directory
+      notify: Restart rsyslog
+
+    # Template a temporary HAProxy config to allow the HAProxy service to start before final configuration
+    - name: Template temporary haproxy config
+      ansible.builtin.template:
+        src: bootstrap.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+      when: configure_letsencrypt
+
+    # Restart the HAProxy service
+    - name: Restart HAProxy
+      ansible.builtin.systemd:
+        service: haproxy
+        state: restarted
+      when: configure_letsencrypt
+
+    # Create a directory to store SSL certificates
+    - name: make SSL cert directory
+      ansible.builtin.file:
+        path: /etc/ssl/haproxy
+        state: directory
+
+    # Create a directory to store the post hooks needed for certbot and certificate renewal
+    - name: make post-hook directory
+      ansible.builtin.file:
+        path: /etc/letsencrypt/renewal-hooks/post
+        state: directory
+      when: configure_letsencrypt
+
+    # Copy the post hook script to the newly-created post hooks directory
+    - name: copy post-hook script
+      ansible.builtin.copy:
+        src: post-hook.sh
+        dest: /etc/letsencrypt/renewal-hooks/post/haproxy.sh
+        mode: '0774'
+        owner: root
+        group: root
+      when: configure_letsencrypt
+    
+    # Ensure required letsencrypt directories exist
+    - name: Ensure directories exist
+      ansible.builtin.file:
+        path: "/etc/letsencrypt/{{item}}"
+        state: directory
+        mode: '0750'
+      loop:
+        - archive
+        - csr
+        - keys
+        - "live/{{domain_list[0]}}"
+
+    # Setup Certbot to allow certificate renewal
+    - name: run Certbot command
+      ansible.builtin.command: "certbot certonly --standalone -d {{domain_list | join(' -d ')}} --agree-tos --email {{ admin_email }} --http-01-port=8888 --expand --non-interactive --post-hook /etc/letsencrypt/renewal-hooks/post/haproxy.sh"
+      when: configure_letsencrypt
+
+    # Generate more secure DH (Diffie-Hellman) parameters for OpenSSL
+    - name: generate more secure DH params
+      ansible.builtin.command: "openssl dhparam -out /etc/haproxy/dhparams.pem 2048"
+
+    # Create a systemd timer file to run certbot certificate renewal automatically
+    - name: Copy systemd timer file
+      ansible.builtin.copy:
+        src: certbot-renewal.timer
+        dest: /etc/systemd/system
+        owner: root
+        group: root
+      when: configure_letsencrypt
+
+    # Create a systemd unit file for the certbot certificate renewal process
+    - name: Copy systemd unit file
+      ansible.builtin.copy:
+        src: certbot-renewal.service
+        dest: /etc/systemd/system
+        owner: root
+        group: root
+      when: configure_letsencrypt
+
+    # Enable the newly created certbot systemd timer
+    - name: enable certbot renew timer
+      ansible.builtin.systemd:
+        name: certbot-renewal.timer
+        state: started
+        daemon_reload: yes
+        enabled: yes
+      when: configure_letsencrypt
+    
+    # Template and install the final HAProxy configuration file
+    - name: Template haproxy config
+      ansible.builtin.template:
+        src: config.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+      notify: Restart haproxy
+
+  handlers:
+    - name: Restart rsyslog
+      ansible.builtin.systemd:
+        service: rsyslog
+        state: restarted
+    - name: Restart haproxy
+      ansible.builtin.systemd:
+        service: haproxy
+        state: restarted
+        enabled: yes

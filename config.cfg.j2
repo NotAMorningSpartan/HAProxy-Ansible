@@ -1,0 +1,117 @@
+#---------------------------------------------------------------------
+# Global settings
+#---------------------------------------------------------------------
+global
+    log         /dev/log local2 info
+
+    chroot      /var/lib/haproxy
+    pidfile     /var/run/haproxy.pid
+    maxconn     4000
+    user        haproxy
+    group       haproxy
+    daemon
+
+    # turn on stats unix socket
+    stats socket /var/lib/haproxy/stats
+
+    # utilize system-wide crypto-policies
+    ssl-default-bind-ciphers PROFILE=SYSTEM
+    ssl-default-server-ciphers PROFILE=SYSTEM
+    ssl-dh-param-file /etc/haproxy/dhparams.pem
+
+#---------------------------------------------------------------------
+# common defaults that all the 'listen' and 'backend' sections will
+# use if not designated in their block
+#---------------------------------------------------------------------
+defaults
+    mode                    http
+    log                     global
+    option                  httplog
+    option                  dontlognull
+    option http-server-close
+    option forwardfor       except 127.0.0.0/8
+    option                  redispatch
+    retries                 3
+    timeout http-request    10sf
+    timeout queue           1m
+    timeout connect         10s
+    timeout client          1m
+    timeout server          1m
+    timeout http-keep-alive 10s
+    timeout check           10s
+    maxconn                 3000
+
+
+
+#---------------------------------------------------------------------
+# Stats Page Config
+#---------------------------------------------------------------------
+{% if stats_page_enable %}
+listen stats
+        bind {{ ansible_default_ipv4.address }}:{{ stats_page_port }}
+        mode http
+        stats enable
+        stats hide-version
+        stats refresh 10s
+        stats realm Haproxy\ Statistics
+        stats uri /
+        stats auth {{ stats_page_username }}:{{ stats_page_password }}
+{% endif %}
+
+
+#---------------------------------------------------------------------
+# Frontend Config
+#---------------------------------------------------------------------
+frontend haproxy
+    #public IP address binded
+    bind {{ ansible_default_ipv4.address }}:80
+    bind {{ ansible_default_ipv4.address }}:443 ssl crt /etc/ssl/haproxy/{{domain_list[0]}}-combined.pem
+
+    # HTTPS redirect
+    redirect scheme https code 301 if !{ ssl_fc }
+
+    mode http
+{% for key, service in services.items() %}
+{% if service.default %}
+    default_backend {{ key }} 
+{% endif %}
+{% endfor %}    
+
+    http-request set-header X-Forwarded-Port %[dst_port]
+    http-request add-header X-Forwarded-Proto https if { ssl_fc }
+
+    # ACLs
+    acl letsencrypt-acl path_beg /.well-known/acme-challenge/
+{% for key, service in services.items() %}
+{% if service.configure %}
+    acl acl_{{ key }} hdr(host) -i {{ service.domain.subdomain }}.{{ service.domain.main_domain}}
+{% endif %}
+{% endfor %}
+#Backend selectors
+    use_backend letsencrypt-backend if letsencrypt-acl
+{% for key, service in services.items() %}
+{% if service.configure %}
+    use_backend {{ key }} if acl_{{ key }}
+{% endif %}
+{% endfor %}
+
+
+#---------------------------------------------------------------------
+# Backend Config
+#---------------------------------------------------------------------
+
+backend letsencrypt-backend
+    server letsencrypt 127.0.0.1:8888
+
+{% for key, service in services.items() %}
+{% if service.configure %}
+backend {{ key }}
+{% if service.mode is defined %}    mode {{ service.mode }}{% endif %}{{''}}
+    balance {{ service.balance | default('roundrobin') }}
+{% if service.backend_config_options is defined %}{{ service.backend_config_options | indent( width=4, indentfirst=True) }}{% endif %}{{''}}
+{% for server in service.servers %}
+    server {{ key }}{{loop.index}} {{ server }}{% if service.server_config_options is defined %} {{ service.server_config_options }}{% endif %}{{''}}
+{% endfor %}
+{% endif %}
+
+{% endfor %}

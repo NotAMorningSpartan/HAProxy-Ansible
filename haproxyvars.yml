@@ -1,0 +1,56 @@
+admin_email: 
+
+# Setup and enable the stats page
+stats_page_enable: true
+stats_page_port: 8088
+stats_page_username: ""
+stats_page_password: ""
+configure_letsencrypt: True
+
+# First listed domain will be the main domain & the name of the certificate. 
+# It doesn't matter a lot, but I would put something like www or whatever the main service is as the first domain
+# So I think it might actually work to put different domains x.AAA.com and y.BBB.com in the same certificate, but it seems "more correct"
+# to me to put them in separate certs. The post-hook script should handle multiple certs. This playbook can't generate multiple certs, but 
+# certbot can be run manually after the setup with the following command 
+# certbot certonly --standalone -d z.BBB.com -d y.BBB.com -d x.BBB.com  --agree-tos --email something@email.com --http-01-port=8888 --expand --post-hook /etc/letsencrypt/renewal-hooks/post/haproxy.sh 
+# if you need to add another domain to the cert later (whether AAA.com or BBB.com) you can use the same command, just make sure to specify all existing (sub)domains and any new ones.
+
+domain_list:
+  - domain.xyz
+
+# Enter your backends below. Order doesn't particularly matter.
+# Make sure to set one as the default backend, but only select one.
+# I'm not sure how it would break if you selected multiple. I think it might just use the last one, but I didn't test that. So just pick one.
+# you can either comment out or just set configure to false for backends you don't need/want to setup. Likewise you can add others, just make 
+# sure that each name is unique.
+
+# Always put an IP address with the port for the server address. If you put multiple, they will be loadbalanced.
+# In many loadbalancing situation you may want to add the backend options (stick table). What that does
+# is pin each user "session" to the same backend so that they keep going to the same server.
+# If you aren't loadbalancing, and only have one server you can remove the stick table options.
+
+# If your service uses a self signed certificate, make sure to have "ssl verify none" in the server config options. Don't use it if the backend is just HTTP
+# Putting a check statement on a single server (not loadbalanced) probably isn't very beneficial, but other than a little extra LAN traffic and load on your server
+# i can't see that it would really hurt. Plus I like to see green OKs in the status page.
+
+# Below are 2 examples; one with a self signed certificate, and the other is only http. Change values as necessary.
+
+services:
+  app1:
+    configure: true
+    default: false
+    domain:
+      subdomain: "app1"
+      main_domain: "domain.xyz"
+    servers: 
+      - "1.1.1.1:8443"
+    server_config_options: "check ssl verify none"
+  app2:
+    configure: true
+    default: false
+    domain:
+      subdomain: "app2"
+      main_domain: "domain.xyz"
+    servers:
+      - "2.2.2.2:80"
+    server_config_options: "check"

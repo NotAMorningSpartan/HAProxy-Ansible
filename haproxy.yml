@@ -28,7 +28,7 @@
     
     # Install EPEL depending on RHEL version
     - name: Install EPEL
-      ansible.buiiltin.yum: 
+      ansible.builtin.yum: 
         name: "https://dl.fedoraproject.org/pub/epel/epel-release-latest-{{ ansible_distribution_major_version }}.noarch.rpm"
         state: present
         disable_gpg_check: yes
